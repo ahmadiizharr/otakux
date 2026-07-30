@@ -1,5 +1,5 @@
 @echo off
-REM Jalankan worker pengecek chapter terbaru Komiku.
+REM Jalankan worker pengecek episode terbaru Otakudesu.
 REM Argumen apa pun diteruskan ke worker.py, mis: run.bat --once
 setlocal
 set "PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"

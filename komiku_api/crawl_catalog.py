@@ -1,76 +1,51 @@
 #!/usr/bin/env python3
 """
-Crawl SEMUA halaman katalog -> simpan data level-kartu untuk tiap manga.
+Seed katalog dari indeks A–Z Otakudesu `/anime-list/` (SEMUA anime sekaligus).
 
-Ini TAHAP 1 (cepat): hanya title/slug/href/thumbnail/tipe/status.
-Detail penuh (author, sinopsis, genre, chapter) diisi oleh enrich_details.py.
+Ini TAHAP 1 (cepat, 1 request): simpan title/slug/url tiap anime. Thumbnail
+diisi via AniList (`fetch_thumbnails.py`), detail lain (sinopsis/genre/episode)
+via `enrich_details.py`.
 
-Berhenti otomatis saat sebuah halaman mengembalikan 0 kartu.
+Urutan pipeline yang disarankan:
+    python crawl_catalog.py        # seed semua judul dari /anime-list/
+    python fetch_thumbnails.py     # isi thumbnail dari AniList
+    python enrich_details.py       # isi sinopsis/genre/episode per anime
 
 Contoh:
-    python crawl_catalog.py --tipe manga            # semua manga
-    python crawl_catalog.py                          # semua tipe (/daftar-komik/)
-    python crawl_catalog.py --tipe manga --max 82 --delay 0.5
+    python crawl_catalog.py
+    python crawl_catalog.py --url https://otakudesu.blog/anime-list/
 """
 from __future__ import annotations
-import sys, io, time, argparse
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+import sys, argparse
+sys.stdout.reconfigure(encoding="utf-8")   # line-buffered: progres real-time
 
-from scraper import scrape_list, BASE
+from scraper import scrape_anime_list, BASE
 from ingest import upsert_card
 from db import init_db
 
 
-def build_url(tipe: str | None, halaman: int) -> str:
-    parts = []
-    if tipe:
-        parts.append(f"tipe={tipe}")
-    if halaman > 1:
-        parts.append(f"halaman={halaman}")
-    q = ("?" + "&".join(parts)) if parts else ""
-    return f"{BASE}/daftar-komik/{q}"
-
-
-def run(tipe: str | None, max_pages: int, delay: float) -> None:
+def run(url: str) -> None:
     init_db()
-    total_new = total_seen = 0
-    seen_slugs: set[str] = set()
+    entries = scrape_anime_list(url)
+    print(f"{len(entries)} anime di {url}\n")
 
-    for h in range(1, max_pages + 1):
-        url = build_url(tipe, h)
-        try:
-            cards = scrape_list(url=url)
-        except Exception as e:  # noqa: BLE001
-            print(f"halaman {h}: ERROR {e} -> stop")
-            break
-        if not cards:
-            print(f"halaman {h}: 0 kartu -> selesai")
-            break
+    total_new = 0
+    for i, e in enumerate(entries, 1):
+        if not e.get("slug"):
+            continue
+        _id, is_new = upsert_card(e)   # {title, slug, url}; thumbnail via AniList
+        if is_new:
+            total_new += 1
+        if i % 200 == 0 or i == len(entries):
+            print(f"[{i}/{len(entries)}] disimpan  (baru={total_new})")
 
-        new_here = 0
-        for card in cards:
-            if not card.get("slug"):
-                continue
-            if card["slug"] in seen_slugs:
-                continue
-            seen_slugs.add(card["slug"])
-            _id, is_new = upsert_card(card)
-            total_seen += 1
-            if is_new:
-                new_here += 1
-                total_new += 1
-        print(f"halaman {h:>3}: {len(cards):>2} kartu ({new_here} baru)  "
-              f"| kumulatif unik={len(seen_slugs)}")
-        time.sleep(delay)
-
-    print(f"\nSelesai. Total manga unik={len(seen_slugs)}  "
-          f"(baru dimasukkan={total_new})")
+    print(f"\nSelesai. Total anime={len(entries)}  (baru dimasukkan={total_new})")
+    print("Lanjut: python fetch_thumbnails.py  &&  python enrich_details.py")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tipe", default="manga", help="manga/manhwa/manhua; kosongkan utk semua")
-    ap.add_argument("--max", type=int, default=200, help="batas halaman (safety)")
-    ap.add_argument("--delay", type=float, default=0.5)
+    ap.add_argument("--url", default=f"{BASE}/anime-list/",
+                    help="URL indeks anime (default /anime-list/)")
     args = ap.parse_args()
-    run(args.tipe or None, args.max, args.delay)
+    run(args.url)

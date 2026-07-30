@@ -27,7 +27,7 @@ python run.py
 Ini menyalakan **API + worker** sekaligus. Log keduanya tampil dengan prefix
 `[api]` dan `[worker]`. Tekan **Ctrl+C** untuk menghentikan semuanya.
 
-- API: <http://localhost:8080> — docs interaktif: <http://localhost:8080/docs>
+- API: <http://localhost:8081> — docs interaktif: <http://localhost:8081/docs>
 - Worker langsung mengecek update saat start, lalu ulang tiap 30 menit.
 
 ## Opsi
@@ -42,7 +42,7 @@ Konfigurasi lewat environment variable (opsional):
 | Variabel          | Default   | Keterangan                             |
 |-------------------|-----------|----------------------------------------|
 | `HOST`            | `0.0.0.0` | host uvicorn                           |
-| `PORT`            | `8080`    | port uvicorn                           |
+| `PORT`            | `8081`    | port uvicorn                           |
 | `WORKER_INTERVAL` | `1800`    | jeda antar siklus worker (detik)       |
 | `RELOAD`          | *(off)*   | set `1` untuk `uvicorn --reload` (dev) |
 

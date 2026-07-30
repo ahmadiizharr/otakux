@@ -1,41 +1,122 @@
 #!/usr/bin/env python3
 """
-Komiku scraper (berbasis Scrapling).
+Otakudesu scraper (berbasis Scrapling).
 
-- scrape_list(tipe, page)  -> daftar {title, slug, url} dari halaman /daftar-komik
-- scrape_detail(url)       -> dict lengkap 1 manga + list chapter
+- scrape_list(url)      -> daftar {title, slug, url, ...} dari halaman katalog
+                           (mis. /ongoing-anime/, /complete-anime/, /anime-list/)
+- scrape_detail(url)    -> dict lengkap 1 anime + daftar episode
+- scrape_episode(url)   -> link download 1 episode (dikelompokkan per resolusi)
 
 Semua fungsi mengembalikan data terstruktur (dict/list) siap dimasukkan ke DB.
 """
 from __future__ import annotations
+import base64
+import http.cookiejar
+import json
 import re
-from urllib.parse import urljoin, quote, urlparse
+import urllib.error
+import urllib.parse
+import urllib.request
+from urllib.parse import urljoin, urlparse
 from scrapling.fetchers import Fetcher
 
-BASE = "https://komiku.org"
+BASE = "https://otakudesu.blog"
 
-# Proxy Worker untuk gambar (format: {base}/?url=<url-encoded>).
-# Default MATI (None) -> kembalikan URL gambar asli. Proxy dipasang nanti oleh
-# konsumen API (mis. lewat ?proxy=... di endpoint) kalau memang butuh.
-# Contoh Worker: https://silent-disk-c067.ginaderoli.workers.dev
-IMAGE_PROXY = None
-
-
-def proxy_image(src: str, proxy: str | None = IMAGE_PROXY) -> str:
-    """Bungkus URL gambar lewat proxy Worker: {proxy}/?url=<encoded>.
-    proxy=None -> kembalikan URL asli tanpa dibungkus."""
-    if not proxy:
-        return src
-    return f"{proxy.rstrip('/')}/?url={quote(src, safe='')}"
+# Endpoint & action AJAX Otakudesu untuk meresolve mirror stream (data-content).
+# Alur (dari JS halaman episode): POST action NONCE -> dapat nonce; lalu POST
+# {id,i,q,nonce, action RESOLVE} -> {data:<base64 iframe>} -> ambil src.
+# NB: action ter-obfuscate (md5) & bisa berubah sewaktu-waktu -> rapuh.
+_AJAX_URL = f"{BASE}/wp-admin/admin-ajax.php"
+_AJAX_NONCE_ACTION = "aa1208d27f29ca340c92c66d1926f13f"
+_AJAX_RESOLVE_ACTION = "2a3505c93b0035d3f455df82bf976b84"
 
 
-# CDN gambar Komiku. Dipakai sebagai allowlist endpoint /img supaya endpoint itu
-# tidak jadi open proxy (bisa dipakai orang buat fetch URL sembarangan lewat server kita).
-IMAGE_HOSTS = {"img.komiku.org", "thumbnail.komiku.org"}
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Cegah urllib mengikuti redirect supaya bisa baca header Location."""
+    def redirect_request(self, *args):  # noqa: D401
+        return None
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def resolve_link(url: str, timeout: int = 15) -> str:
+    """Ubah link redirect `link.desustream.com/?id=...` -> URL asli host.
+
+    Situs Otakudesu membungkus tiap link download lewat `link.desustream.com`
+    yang membalas **302** dengan header `Location` ke host asli (krakenfiles,
+    pixeldrain, mega, dst). Fungsi ini GET tanpa mengikuti redirect lalu ambil
+    `Location`. Kalau gagal/tanpa redirect, kembalikan URL semula (aman).
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        r = _no_redirect_opener.open(req, timeout=timeout)
+        return r.headers.get("Location") or url          # jarang: 200 langsung
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308):
+            return e.headers.get("Location") or url
+        return url
+    except Exception:  # noqa: BLE001
+        return url
+
+
+def resolve_mirror_streams(episode_url: str, mirrors: list[dict],
+                           timeout: int = 20, max_workers: int = 8) -> list[dict]:
+    """Resolve tiap mirror (punya `data_content`) menjadi embed `stream_url`.
+
+    Alur AJAX 2 langkah (lihat konstanta di atas): ambil nonce sekali, lalu
+    POST {id,i,q,nonce} per mirror -> {data:<base64 iframe>} -> ambil `src`.
+    Return [{quality, provider, stream_url}]; mirror yang gagal di-skip.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    hdr = {"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest",
+           "Referer": episode_url, "Origin": BASE}
+
+    def _post(data: dict) -> dict:
+        body = urllib.parse.urlencode(data).encode()
+        req = urllib.request.Request(
+            _AJAX_URL, data=body,
+            headers={**hdr, "Content-Type":
+                     "application/x-www-form-urlencoded; charset=UTF-8"})
+        with opener.open(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+
+    try:
+        nonce = _post({"action": _AJAX_NONCE_ACTION}).get("data")
+    except Exception:  # noqa: BLE001
+        return []
+    if not nonce:
+        return []
+
+    def _one(m: dict) -> dict | None:
+        token = m.get("data_content")
+        if not token:
+            return None
+        try:
+            params = json.loads(base64.b64decode(token))
+            res = _post({**params, "nonce": nonce,
+                         "action": _AJAX_RESOLVE_ACTION})
+            html = base64.b64decode(res["data"]).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            return None
+        mm = re.search(r'src="([^"]+)"', html)
+        if not mm:
+            return None
+        # Mega: pastikan bentuk /embed/ (bukan /file/) agar bisa di-embed.
+        src = mm.group(1).replace("mega.nz/file/", "mega.nz/embed/")
+        return {"quality": m.get("resolution"),
+                "provider": m.get("name"), "stream_url": src}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        out = list(ex.map(_one, mirrors))
+    return [x for x in out if x]
 
 
 class HttpError(RuntimeError):
-    """Response non-200 dari Komiku; `status` dipakai API buat memetakan kode."""
+    """Response non-200 dari Otakudesu; `status` dipakai API buat memetakan kode."""
 
     def __init__(self, status: int, url: str):
         super().__init__(f"HTTP {status} for {url}")
@@ -44,35 +125,10 @@ class HttpError(RuntimeError):
 
 
 def _get(url: str):
-    page = Fetcher.get(url, impersonate="chrome", timeout=30)
+    page = Fetcher.get(url, impersonate="chrome", timeout=40)
     if page.status != 200:
         raise HttpError(page.status, url)
     return page
-
-
-def is_komiku_image(url: str) -> bool:
-    """True kalau URL menunjuk ke CDN gambar Komiku (dan http/https)."""
-    try:
-        u = urlparse(url)
-    except ValueError:
-        return False
-    return u.scheme in ("http", "https") and u.hostname in IMAGE_HOSTS
-
-
-def fetch_image(url: str) -> tuple[bytes, str]:
-    """Ambil byte gambar dari CDN Komiku -> (bytes, content_type).
-
-    CDN-nya pakai hotlink protection: tanpa header Referer komiku.org dia balas
-    403 + HTML, bukan gambar. Karena itu request ini WAJIB bawa Referer.
-    """
-    r = Fetcher.get(url, impersonate="chrome", timeout=30,
-                    headers={"Referer": f"{BASE}/"})
-    ctype = (r.headers.get("content-type") or "").split(";")[0].strip()
-    if r.status != 200:
-        raise HttpError(r.status, url)
-    if not ctype.startswith("image/"):
-        raise RuntimeError(f"bukan gambar (content-type={ctype!r}) untuk {url}")
-    return r.body, ctype
 
 
 def _first(node, sel):
@@ -82,191 +138,282 @@ def _first(node, sel):
 
 
 def _slug_from_url(url: str) -> str:
-    # https://komiku.org/manga/50kg-cinderella/ -> 50kg-cinderella
-    m = re.search(r"/manga/([^/]+)/?", url)
-    return m.group(1) if m else url.rstrip("/").split("/")[-1]
+    """URL anime -> slug.
 
-
-def scrape_list(tipe: str | None = None, page_num: int = 1,
-                url: str | None = None) -> list[dict]:
-    """Ambil daftar manga dari halaman katalog.
-
-    - url  : override URL penuh (mis. "https://komiku.org/daftar-komik/")
-    - tipe : filter ?tipe=manga/manhwa/manhua (opsional)
-    Mengembalikan data kartu: title, slug, url (a href), card_thumbnail,
-    card_type, card_genre, card_status (dari <p class=meta>).
+    https://otakudesu.blog/anime/100-man-no-inochi-sub-indo/ -> 100-man-no-inochi-sub-indo
     """
-    if url is None:
-        q = f"?tipe={tipe}&page={page_num}" if tipe else (
-            "" if page_num == 1 else f"?page={page_num}")
-        url = f"{BASE}/daftar-komik/{q}"
+    m = re.search(r"/anime/([^/]+)/?", url or "")
+    return m.group(1) if m else (url or "").rstrip("/").split("/")[-1]
+
+
+def _episode_number(text: str) -> float | None:
+    """Ambil nomor episode dari judul/slug (mis. 'Episode 12 (End)' -> 12.0,
+    'episode-7-5-sub-indo' -> 7.5). None kalau tak ketemu (batch/movie)."""
+    if not text:
+        return None
+    m = re.search(r"[Ee]pisode[ \-]+(\d+(?:[.\-]\d+)?)", text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace("-", "."))
+    except ValueError:
+        return None
+
+
+def scrape_list(url: str) -> list[dict]:
+    """Ambil daftar anime dari halaman katalog Otakudesu.
+
+    Kartu ada di `.venz ul li` (25/halaman). Mengembalikan data kartu:
+    title, slug, url (halaman /anime/...), card_thumbnail, latest_episode.
+    Ongoing/complete/homepage semuanya memakai markup yang sama.
+    """
     page = _get(url)
     out = []
-    for card in page.css(".manga-card"):
-        h4 = _first(card, "h4")
-        a = _first(card, "a")
-        if not h4:
-            continue
+    for li in page.css(".venz ul li"):
+        a = _first(li, ".thumb a") or _first(li, "a")
         href = a.attrib.get("href") if a else None
         full = urljoin(BASE, href) if href else None
+        if not full or "/anime/" not in full:
+            continue
 
-        # thumbnail ada di data-src (lazy load)
-        img = _first(card, "img")
+        title_el = _first(li, ".jdlflm")
+        title = title_el.get_all_text(strip=True) if title_el else None
+
+        img = _first(li, "img")
         thumb = None
         if img:
-            thumb = img.attrib.get("data-src") or img.attrib.get("src")
+            thumb = img.attrib.get("src") or img.attrib.get("data-src")
 
-        # meta: "Manga • Drama\nStatus: Ongoing"
-        meta = _first(card, ".meta")
-        card_type = card_genre = card_status = None
-        if meta:
-            txt = meta.get_all_text(strip=False)
-            first_line = txt.strip().split("\n")[0]
-            if "•" in first_line:
-                parts = [p.strip() for p in first_line.split("•", 1)]
-                card_type = parts[0] or None
-                card_genre = parts[1] if len(parts) > 1 else None
-            m = re.search(r"Status:\s*([A-Za-z]+)", txt)
-            card_status = m.group(1) if m else None
+        ep_el = _first(li, ".epz")
+        latest_episode = ep_el.get_all_text(strip=True) if ep_el else None
 
         out.append({
-            "title": h4.get_all_text(strip=True),
-            "slug": _slug_from_url(full) if full else None,
+            "title": title,
+            "slug": _slug_from_url(full),
             "url": full,
             "card_thumbnail": thumb,
-            "card_type": card_type,
-            "card_genre": card_genre,
-            "card_status": card_status,
+            "latest_episode": latest_episode,
+        })
+    return out
+
+
+def scrape_anime_list(url: str | None = None) -> list[dict]:
+    """Ambil SELURUH katalog anime dari indeks A–Z `/anime-list/`.
+
+    Tiap entri = `<a class="hodebgst">` berisi judul + href ke `/anime/{slug}/`.
+    Satu halaman memuat semua judul (~1800+), jadi jauh lebih cepat daripada
+    menyusuri ongoing/complete yang dipaginasi. Halaman ini TIDAK punya
+    thumbnail/episode — thumbnail diisi via AniList (lihat anilist.py), detail
+    lain via enrich_details.py. Return list {title, slug, url}.
+    """
+    if url is None:
+        url = f"{BASE}/anime-list/"
+    page = _get(url)
+    out, seen = [], set()
+    for a in page.css("a.hodebgst"):
+        href = a.attrib.get("href")
+        full = urljoin(BASE, href) if href else None
+        if not full or "/anime/" not in full or full in seen:
+            continue
+        seen.add(full)
+        out.append({
+            "title": a.get_all_text(strip=True),
+            "slug": _slug_from_url(full),
+            "url": full,
         })
     return out
 
 
 def _info_map(page) -> dict[str, str]:
-    """Ubah tabel .inftable jadi dict {label: value}."""
+    """Ubah blok `.infozingle p` (tiap <p> = '<b>Label</b>: value') jadi dict."""
     info = {}
-    for tr in page.css(".inftable tr"):
-        tds = tr.css("td")
-        if len(tds) >= 2:
-            key = tds[0].get_all_text(strip=True).rstrip(":").strip()
-            val = tds[1].get_all_text(strip=True)
-            info[key] = val
+    for p in page.css(".infozingle p"):
+        b = _first(p, "b")
+        if not b:
+            continue
+        full = p.get_all_text(strip=True)
+        key = b.get_all_text(strip=True).rstrip(":").strip()
+        # Nilai = teks setelah ':' pertama (label & nilai dipisah ':' oleh situs).
+        val = full.split(":", 1)[1].strip() if ":" in full else ""
+        info[key] = val
     return info
 
 
+def _score(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    m = re.search(r"[\d.]+", raw)
+    try:
+        return float(m.group(0)) if m else None
+    except ValueError:
+        return None
+
+
 def scrape_detail(url: str) -> dict:
-    """Ambil semua field detail 1 manga + daftar chapter."""
+    """Ambil semua field detail 1 anime + daftar episode."""
     page = _get(url)
     info = _info_map(page)
 
-    # Genre = kumpulan <a> di baris Genre
+    # Genre = kumpulan <a> di dalam <p> berlabel "Genre".
     genres = []
-    for tr in page.css(".inftable tr"):
-        label = _first(tr, "td")
-        if label and label.get_all_text(strip=True).rstrip(":").lower() == "genre":
-            genres = [a.get_all_text(strip=True) for a in tr.css("a")]
+    for p in page.css(".infozingle p"):
+        b = _first(p, "b")
+        if b and b.get_all_text(strip=True).rstrip(":").lower() == "genre":
+            genres = [a.get_all_text(strip=True) for a in p.css("a")]
             break
 
-    # Sinopsis
-    syn_el = _first(page, "#Sinopsis p") or _first(page, ".sinopsis p")
-    sinopsis = syn_el.get_all_text(strip=True) if syn_el else None
+    syn_el = _first(page, ".sinopc")
+    synopsis = syn_el.get_all_text(strip=True) if syn_el else None
 
-    # Thumbnail
-    img = _first(page, "[itemprop=image]") or _first(page, ".ims img")
+    img = _first(page, ".fotoanime img")
     thumbnail = img.attrib.get("src") if img else None
 
-    # Total views (dari "Total: 15575 views, ...")
-    views = None
-    if info.get("Pembaca"):
-        m = re.search(r"Total:\s*([\d.]+)", info["Pembaca"])
-        if m:
-            views = int(m.group(1).replace(".", ""))
-
-    # Chapters
-    chapters = []
-    for tr in page.css("#Daftar_Chapter tr"):
-        a = _first(tr, "a")
+    # Episode: kumpulkan semua <li> di blok .episodelist yang menunjuk ke
+    # /episode/ (lewati Batch di /batch/ dan link "download lengkap"). Dedup url.
+    episodes = []
+    seen: set[str] = set()
+    for li in page.css(".episodelist ul li"):
+        a = _first(li, "a")
         if not a:
-            continue  # header row
-        tds = tr.css("td")
-        chapters.append({
-            "name": a.get_all_text(strip=True),
-            "url": urljoin(BASE, a.attrib.get("href", "")),
-            "released_at": tds[-1].get_all_text(strip=True) if len(tds) > 1 else None,
+            continue
+        href = urljoin(BASE, a.attrib.get("href", ""))
+        if "/episode/" not in href or href in seen:
+            continue
+        seen.add(href)
+        name = a.get_all_text(strip=True)
+        date_el = _first(li, ".zeebr")
+        episodes.append({
+            "name": name,
+            "url": href,
+            "number": _episode_number(name) or _episode_number(href),
+            "released_at": date_el.get_all_text(strip=True) if date_el else None,
         })
+
+    # Movie/one-shot: satu entri tanpa nomor "Episode N" -> anggap episode 1
+    # supaya bisa diakses lewat /anime/{slug}/episode/1.
+    if len(episodes) == 1 and episodes[0]["number"] is None:
+        episodes[0]["number"] = 1.0
 
     title = info.get("Judul") or ""
     return {
         "slug": _slug_from_url(url),
-        "title": title.lstrip("-").strip(),
-        "title_alt": info.get("Judul Alternatif"),
+        "title": title.strip(),
+        "title_japanese": info.get("Japanese"),
         "type": info.get("Tipe"),
-        "theme": info.get("Tema"),
-        "genres": genres,
-        "author": info.get("Author"),
         "status": info.get("Status"),
-        "age_rating": info.get("Rating"),          # cth "15+"
-        "reading_direction": info.get("Cara Baca"),
-        "total_views": views,
-        "synopsis": sinopsis,
+        "score": _score(info.get("Skor")),
+        "producers": info.get("Produser"),
+        "studio": info.get("Studio"),
+        "total_episode": info.get("Total Episode"),
+        "duration": info.get("Durasi"),
+        "release_date": info.get("Tanggal Rilis"),
+        "genres": genres,
+        "synopsis": synopsis,
         "thumbnail": thumbnail,
         "source_url": url,
-        "chapters": chapters,
+        "episodes": episodes,
     }
 
 
-def _parse_chapter_url(url: str) -> tuple[str, str | None]:
-    """URL chapter -> (manga_slug, nomor_chapter).
+def scrape_episode(url: str) -> dict:
+    """Scrape halaman 1 episode: ambil link download per resolusi.
 
-    https://komiku.org/50kg-cinderella-chapter-1-1/  -> ('50kg-cinderella', '1.1')
-    https://komiku.org/...-c-25/                      -> (manga_slug, '25')
-    Nomor: tanda '-' setelah 'chapter'/'c' diubah jadi '.'  (1-1 -> 1.1)
-    """
-    path = url.rstrip("/").split("/")[-1]
-    for sep in ("-chapter-", "-c-"):
-        if sep in path:
-            manga_slug, num = path.rsplit(sep, 1)
-            return manga_slug, num.replace("-", ".")
-    return path, None
-
-
-def scrape_chapter(url: str, proxy: str | None = IMAGE_PROXY) -> dict:
-    """Scrape halaman baca 1 chapter: ambil semua gambar dari #Baca_Komik.
-
-    Mengembalikan slug rapi 'manga/<slug>/chapter/<nomor>' + daftar gambar
-    yang sudah dibungkus proxy (dan versi mentahnya).
+    Blok `.download ul li` = satu resolusi. Tiap li: <strong> resolusi,
+    beberapa <a> (host mirror), <i> ukuran file. Mengembalikan daftar
+    {resolution, size, hosts:[{name,url}]}.
     """
     page = _get(url)
-    manga_slug, number = _parse_chapter_url(url)
 
-    # Gambar halaman selalu <img class="klazy ww"> di dalam #Baca_Komik.
-    # Pakai .ww supaya banner/iklan di container yang sama tidak ikut terambil;
-    # fallback ke semua img kalau suatu chapter tidak memakai class itu.
-    imgs = page.css("#Baca_Komik img.ww") or page.css("#Baca_Komik img")
-    raw = []
-    for im in imgs:
-        src = im.attrib.get("src") or im.attrib.get("data-src")
-        if src:
-            raw.append(src)
+    downloads = []
+    for li in page.css(".download ul li"):
+        res_el = _first(li, "strong")
+        size_el = _first(li, "i")
+        hosts = []
+        for a in li.css("a"):
+            href = a.attrib.get("href")
+            if not href:
+                continue
+            hosts.append({
+                "name": a.get_all_text(strip=True),
+                "url": href,
+            })
+        if not hosts:
+            continue
+        downloads.append({
+            "resolution": res_el.get_all_text(strip=True) if res_el else None,
+            "size": size_el.get_all_text(strip=True) if size_el else None,
+            "hosts": hosts,
+        })
 
-    h1 = _first(page, "h1")
+    # Fallback layout MOVIE/BD: sebagian halaman memakai blok `.yondarkness`
+    # (bukan `ul li`). Judul memuat "[<resolusi>][<ukuran>]" lalu link host di
+    # `.yondarkness-item a` (href asli link.desustream, data-wpel-link=external).
+    if not downloads:
+        titles = page.css(".download .yondarkness-title")
+        items = page.css(".download .yondarkness-item")
+        for t, it in zip(titles, items):
+            bracket = re.findall(r"\[([^\]]+)\]", t.get_all_text(strip=True))
+            hosts = [{"name": a.get_all_text(strip=True), "url": a.attrib.get("href")}
+                     for a in it.css("a") if a.attrib.get("href")]
+            if hosts:
+                downloads.append({
+                    "resolution": bracket[0] if len(bracket) >= 1 else None,
+                    "size": bracket[1] if len(bracket) >= 2 else None,
+                    "hosts": hosts,
+                })
+
+    # Streaming: iframe embed default sudah server-rendered di #pembed (tanpa
+    # AJAX) — langsung dipasang di <iframe>. Ini mirror `data-default="true"`.
+    iframe = _first(page, "#pembed iframe") or \
+        _first(page, ".responsive-embed-stream iframe")
+    stream_url = iframe.attrib.get("src") if iframe else None
+
+    # Daftar mirror alternatif (butuh AJAX admin-ajax untuk resolve tiap embed;
+    # di sini token `data_content` + meta saja, TIDAK diresolve).
+    mirrors = []
+    for ul_sel, res in ((".mirrorstream .m360p", "360p"),
+                        (".mirrorstream .m480p", "480p"),
+                        (".mirrorstream .m720p", "720p")):
+        for a in page.css(ul_sel + " a"):
+            mirrors.append({
+                "name": a.get_all_text(strip=True),
+                "resolution": res,
+                "data_content": a.attrib.get("data-content"),
+                "default": a.attrib.get("data-default") == "true",
+            })
+
+    h1 = _first(page, "h1.posttl") or _first(page, "h1")
+    # Navigasi prev/next di .flir (teks "Previous Eps."/"Next Eps.").
+    prev_url = next_url = None
+    for a in page.css(".flir a"):
+        label = a.get_all_text(strip=True).lower()
+        href = urljoin(BASE, a.attrib.get("href", ""))
+        if "previous" in label:
+            prev_url = href
+        elif "next" in label:
+            next_url = href
+
     return {
-        "slug": f"manga/{manga_slug}/chapter/{number}",
-        "manga_slug": manga_slug,
-        "chapter": number,
         "title": h1.get_all_text(strip=True) if h1 else None,
         "source_url": url,
-        "image_count": len(raw),
-        "images": [proxy_image(s, proxy) for s in raw],
-        "images_raw": raw,
+        "stream_url": stream_url,
+        "mirrors": mirrors,
+        "download_count": len(downloads),
+        "downloads": downloads,
+        "prev_url": prev_url,
+        "next_url": next_url,
     }
 
 
 if __name__ == "__main__":
     import sys, io, json
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-    target = sys.argv[1] if len(sys.argv) > 1 else "https://komiku.org/manga/50kg-cinderella/"
-    if "-chapter-" in target or "-c-" in target:
-        data = scrape_chapter(target)
-    else:
+    target = sys.argv[1] if len(sys.argv) > 1 else \
+        "https://otakudesu.blog/anime/100-man-no-inochi-sub-indo/"
+    if "/episode/" in target:
+        data = scrape_episode(target)
+    elif "/anime/" in target:
         data = scrape_detail(target)
+    else:
+        data = scrape_list(target)
     print(json.dumps(data, ensure_ascii=False, indent=2))

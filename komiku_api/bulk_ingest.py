@@ -1,37 +1,36 @@
 #!/usr/bin/env python3
 """
-Bulk ingest: ambil semua kartu di /daftar-komik/ (50 manga) lalu
-scrape detail tiap manga dan simpan ke DB.
+Bulk ingest: ambil semua kartu di 1 halaman katalog Otakudesu (25 anime)
+lalu scrape detail tiap anime dan simpan ke DB. Sampel cepat.
 
 Pakai jeda antar-request (default 1.0 dtk) agar sopan ke server.
 
 Jalankan:
-    python bulk_ingest.py                     # halaman default (50 manga)
-    python bulk_ingest.py --delay 1.5
-    python bulk_ingest.py --url https://komiku.org/daftar-komik/?tipe=manga
+    python bulk_ingest.py                          # /ongoing-anime/ (halaman 1)
+    python bulk_ingest.py --url https://otakudesu.blog/complete-anime/
+    python bulk_ingest.py --delay 1.5 --force
 """
 from __future__ import annotations
 import sys, io, time, argparse
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-from scraper import scrape_list, scrape_detail
-from ingest import upsert_manga, is_detailed
+from scraper import scrape_list, scrape_detail, BASE
+from ingest import upsert_anime, is_detailed
 from db import init_db
 
 
-def run(list_url: str | None, delay: float, force: bool = False) -> None:
+def run(list_url: str, delay: float, force: bool = False) -> None:
     init_db()
-    cards = scrape_list(url=list_url)
-    print(f"Ditemukan {len(cards)} kartu di daftar-komik\n")
+    cards = scrape_list(list_url)
+    print(f"Ditemukan {len(cards)} kartu di {list_url}\n")
 
     ok, skipped, failed = 0, 0, []
-    seen: set[str] = set()          # dedup dalam 1 run (judul/url sama antar-halaman)
+    seen: set[str] = set()          # dedup dalam 1 run
     for i, card in enumerate(cards, 1):
         url = card["url"]
         slug = card["slug"]
         title = card["title"]
 
-        # 1) sudah diproses di run ini? (mis. muncul lagi di page berikutnya)
         key = slug or url
         if key in seen:
             skipped += 1
@@ -39,7 +38,7 @@ def run(list_url: str | None, delay: float, force: bool = False) -> None:
             continue
         seen.add(key)
 
-        # 2) sudah pernah di-scrape detail di run sebelumnya? (kecuali --force)
+        # sudah pernah di-scrape detail di run sebelumnya? (kecuali --force)
         if not force and is_detailed(slug=slug, url=url):
             skipped += 1
             print(f"[{i:>2}/{len(cards)}] SKIP (sudah ada di DB)     {title}")
@@ -47,10 +46,10 @@ def run(list_url: str | None, delay: float, force: bool = False) -> None:
 
         try:
             data = scrape_detail(url)
-            mid = upsert_manga(data)
+            mid = upsert_anime(data)
             ok += 1
             print(f"[{i:>2}/{len(cards)}] OK  id={mid:<3} "
-                  f"{data['type'] or '?':<7} {len(data['chapters']):>3}ch  {title}")
+                  f"{data['type'] or '?':<4} {len(data['episodes']):>3}ep  {title}")
         except Exception as e:  # noqa: BLE001
             failed.append((title, url, str(e)))
             print(f"[{i:>2}/{len(cards)}] FAIL {title}  -> {e}")
@@ -63,8 +62,8 @@ def run(list_url: str | None, delay: float, force: bool = False) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="https://komiku.org/daftar-komik/",
-                    help="URL halaman daftar")
+    ap.add_argument("--url", default=f"{BASE}/ongoing-anime/",
+                    help="URL halaman katalog (default /ongoing-anime/)")
     ap.add_argument("--delay", type=float, default=1.0,
                     help="jeda antar-request (detik)")
     ap.add_argument("--force", action="store_true",

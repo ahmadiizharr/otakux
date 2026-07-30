@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Satu perintah untuk menjalankan seluruh aplikasi Komiku:
+Satu perintah untuk menjalankan seluruh aplikasi Otakudesu:
 
   * API    -> komiku_api  (FastAPI/uvicorn) di http://HOST:PORT
-  * Worker -> get_new     (pengecek chapter terbaru, loop tiap WORKER_INTERVAL)
+  * Worker -> get_new     (pengecek episode terbaru, loop tiap WORKER_INTERVAL)
 
-Keduanya memakai database yang sama: komiku_api/komiku.db (SQLite, tanpa
+Keduanya memakai database yang sama: komiku_api/anime.db (SQLite, tanpa
 server terpisah).
 
 Pemakaian:
@@ -15,8 +15,9 @@ Pemakaian:
 
 Konfigurasi lewat environment variable:
     HOST             host uvicorn        (default 0.0.0.0)
-    PORT             port uvicorn        (default 8080)
-    WORKER_INTERVAL  detik antar siklus worker (default 1800 = 30 menit)
+    PORT             port uvicorn        (default 8081)
+    WORKER_INTERVAL  detik antar siklus worker (default 43200 = 12 jam;
+                     anime jarang update, tak perlu sering)
     RELOAD           set '1' untuk uvicorn --reload (mode dev)
 
 Ctrl+C menghentikan semuanya. Kalau API mati, seluruh launcher berhenti;
@@ -33,13 +34,13 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-KOMIKU_DIR = ROOT / "komiku_api"
+API_DIR = ROOT / "komiku_api"
 WORKER_DIR = ROOT / "get_new"
 PY = sys.executable  # interpreter yang sama dipakai untuk kedua service
 
 HOST = os.environ.get("HOST", "0.0.0.0")
-PORT = os.environ.get("PORT", "8080")
-WORKER_INTERVAL = os.environ.get("WORKER_INTERVAL", "1800")
+PORT = os.environ.get("PORT", "8081")
+WORKER_INTERVAL = os.environ.get("WORKER_INTERVAL", "43200")  # 12 jam
 RELOAD = os.environ.get("RELOAD", "") not in ("", "0", "false", "False")
 
 # Anak proses: output tak dibuffer + UTF-8 supaya log rapi & real-time.
@@ -128,9 +129,9 @@ def main() -> None:
     if not args.worker_only:
         print(f"[run] API    -> http://{HOST}:{PORT}  (docs: /docs)"
               + ("  [reload]" if RELOAD else ""), flush=True)
-        services.append(Service("api", _api_cmd(), KOMIKU_DIR, restart=False))
+        services.append(Service("api", _api_cmd(), API_DIR, restart=False))
     if not args.api_only:
-        print(f"[run] Worker -> cek chapter terbaru tiap {WORKER_INTERVAL}s",
+        print(f"[run] Worker -> cek episode terbaru tiap {WORKER_INTERVAL}s",
               flush=True)
         services.append(Service("worker", _worker_cmd(), WORKER_DIR, restart=True))
 

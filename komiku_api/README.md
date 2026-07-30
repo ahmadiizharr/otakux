@@ -53,10 +53,10 @@ python ingest.py https://komiku.org/manga/50kg-cinderella/
 Jalankan API:
 
 ```bash
-uvicorn main:app --reload --port 8080
+uvicorn main:app --reload --port 8081
 ```
 
-Buka docs interaktif: http://127.0.0.1:8080/docs
+Buka docs interaktif: http://127.0.0.1:8081/docs
 
 ## Endpoint
 
@@ -88,7 +88,7 @@ GET /manga/50kg-cinderella/chapter/1.1
 ```json
 { "slug": "manga/50kg-cinderella/chapter/1.1", "image_count": 39,
   "source_url": "https://komiku.org/50kg-cinderella-chapter-1-1/",
-  "images": ["http://127.0.0.1:8080/img?url=https%3A%2F%2Fimg.komiku.org%2F..."] }
+  "images": ["http://127.0.0.1:8081/img?url=https%3A%2F%2Fimg.komiku.org%2F..."] }
 ```
 
 Query param:
@@ -239,10 +239,10 @@ Status per 28 Jul 2026: **4.073 manga** di katalog, **90** sudah didetailkan,
 Jangan pakai `--reload` di produksi (itu untuk dev). Contoh:
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8080
+uvicorn main:app --host 0.0.0.0 --port 8081
 ```
 
-Atau lewat launcher root (default host `0.0.0.0`, port `8080`):
+Atau lewat launcher root (default host `0.0.0.0`, port `8081`):
 
 ```bash
 run.bat --api-only
@@ -260,7 +260,7 @@ Komiku (I/O-bound). Boleh menaikkan `--workers N` untuk paralelisme, tapi:
 
 Endpoint reader (`/manga/{slug}/chapter/{number}`) membangun URL `/img?url=...`
 dari **`request.base_url`**. Di balik nginx/Caddy, kalau header forwarded tidak
-diteruskan, URL gambar akan salah (mis. `http://127.0.0.1:8080/...` alih-alih
+diteruskan, URL gambar akan salah (mis. `http://127.0.0.1:8081/...` alih-alih
 `https://domainmu/...`).
 
 - Jalankan uvicorn dengan `--proxy-headers --forwarded-allow-ips="*"`
@@ -270,7 +270,7 @@ diteruskan, URL gambar akan salah (mis. `http://127.0.0.1:8080/...` alih-alih
 Contoh:
 
 ```bash
-uvicorn main:app --host 127.0.0.1 --port 8080 --proxy-headers --forwarded-allow-ips="*"
+uvicorn main:app --host 127.0.0.1 --port 8081 --proxy-headers --forwarded-allow-ips="*"
 ```
 
 ### Database (SQLite)

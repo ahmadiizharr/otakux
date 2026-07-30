@@ -1,66 +1,65 @@
 -- ============================================================
--- Komiku DB schema  (SQLite dialect; catatan Postgres di bawah)
+-- Otakudesu DB schema  (SQLite dialect; catatan Postgres di bawah)
 -- ------------------------------------------------------------
 -- Desain:
---   * manga            : 1 baris per komik (field skalar)
---   * genre + manga_genre : many-to-many (1 manga banyak genre)
---   * chapter          : 1 baris per chapter (1 manga banyak chapter)
+--   * anime             : 1 baris per anime (field skalar)
+--   * genre + anime_genre : many-to-many (1 anime banyak genre)
+--   * episode           : 1 baris per episode (1 anime banyak episode)
 --
--- "tema" (theme) & "tipe" (type) disimpan sebagai kolom di manga
--- karena pada Komiku umumnya bernilai tunggal. Kalau nanti mau
--- multi-tema, tinggal jadikan m2m seperti genre.
+-- Skema ini cuma REFERENSI; DB sebenarnya dibuat oleh db.init_db()
+-- (SQLAlchemy). Kalau berbeda, db.py yang jadi acuan.
 -- ============================================================
 
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE IF NOT EXISTS manga (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    slug              TEXT    NOT NULL UNIQUE,          -- 50kg-cinderella
-    title             TEXT    NOT NULL,
-    title_alt         TEXT,
-    type              TEXT,                             -- Manga / Manhwa / Manhua
-    theme             TEXT,                             -- Tema (cth: Drama)
-    author            TEXT,
-    status            TEXT,                             -- Ongoing / End
-    age_rating        TEXT,                             -- content rating, cth "15+"
-    reading_direction TEXT,                             -- "Kanan ke kiri"
-    total_views       INTEGER DEFAULT 0,
-    synopsis          TEXT,
-    thumbnail         TEXT,
-    source_url        TEXT    NOT NULL,
-    created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_at        TEXT    NOT NULL DEFAULT (datetime('now'))
+CREATE TABLE IF NOT EXISTS anime (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug            TEXT    NOT NULL UNIQUE,          -- 100-man-no-inochi-sub-indo
+    title           TEXT    NOT NULL,
+    title_japanese  TEXT,                             -- judul Jepang (kanji)
+    type            TEXT,                             -- TV / Movie / OVA / ONA
+    status          TEXT,                             -- Ongoing / Completed
+    score           REAL,                             -- skor (cth 6.48)
+    producers       TEXT,                             -- daftar produser (dipisah koma)
+    studio          TEXT,
+    total_episode   TEXT,                             -- string ("12", "?")
+    duration        TEXT,                             -- "23 Menit"
+    release_date    TEXT,                             -- "Oct 2, 2020"
+    synopsis        TEXT,
+    thumbnail       TEXT,
+    source_url      TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_manga_status ON manga(status);
-CREATE INDEX IF NOT EXISTS idx_manga_type   ON manga(type);
+CREATE INDEX IF NOT EXISTS idx_anime_status ON anime(status);
+CREATE INDEX IF NOT EXISTS idx_anime_type   ON anime(type);
 
 CREATE TABLE IF NOT EXISTS genre (
     id   INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE
 );
 
-CREATE TABLE IF NOT EXISTS manga_genre (
-    manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS anime_genre (
+    anime_id INTEGER NOT NULL REFERENCES anime(id) ON DELETE CASCADE,
     genre_id INTEGER NOT NULL REFERENCES genre(id) ON DELETE CASCADE,
-    PRIMARY KEY (manga_id, genre_id)
+    PRIMARY KEY (anime_id, genre_id)
 );
 
-CREATE TABLE IF NOT EXISTS chapter (
+CREATE TABLE IF NOT EXISTS episode (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    manga_id    INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
-    name        TEXT    NOT NULL,                       -- "Chapter 8"
-    number      REAL,                                   -- 8, 2.2, 1.1 (utk sorting)
+    anime_id    INTEGER NOT NULL REFERENCES anime(id) ON DELETE CASCADE,
+    name        TEXT    NOT NULL,                       -- "... Episode 12 (End) ..."
+    number      REAL,                                   -- 12, 7.5 (utk sorting)
     url         TEXT    NOT NULL UNIQUE,
-    released_at TEXT,                                    -- string tanggal asli "07/09/2022"
+    released_at TEXT,                                    -- string tanggal "9 Januari,2021"
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_chapter_manga ON chapter(manga_id, number);
+CREATE INDEX IF NOT EXISTS idx_episode_anime ON episode(anime_id, number);
 
--- Gambar halaman tidak punya tabel: reader di API live-fetch ke Komiku
--- tiap request (parse #Baca_Komik img.ww), jadi tidak ada URL gambar yang
--- disimpan di sini.
+-- Link download episode tidak punya tabel: endpoint di API live-fetch ke
+-- Otakudesu tiap request (parse blok .download), jadi tidak disimpan di sini.
 
 -- ============================================================
 -- Catatan Postgres (kalau pindah dari SQLite):
