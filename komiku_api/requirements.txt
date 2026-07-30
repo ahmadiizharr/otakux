@@ -1,0 +1,5 @@
+scrapling[fetchers]>=0.4.12
+fastapi>=0.110
+uvicorn[standard]>=0.29
+SQLAlchemy>=2.0
+pydantic>=2.6

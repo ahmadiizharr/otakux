@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.local
+*.local
+
+# Database (data hasil scraping — jangan dikomit; besar & berubah terus)
+*.db
+*.db.bak
+*.sqlite
+*.sqlite3
+*-Copy.db
+*Copy.db
+
+# Log
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Berkas nyasar
+D:XIXI*
+komiku_api/python
+temp/
