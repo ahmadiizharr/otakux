@@ -196,6 +196,44 @@ def all_slugs(db: Session = Depends(get_db)):
     return [{"slug": r.slug, "updated_at": r.updated_at} for r in rows]
 
 
+@app.get("/count")
+def counts(db: Session = Depends(get_db)):
+    """Jumlah total manga, chapter, dan genre (buat sitemap + stats)."""
+    return {
+        "manga": db.scalar(select(func.count()).select_from(Manga)),
+        "chapters": db.scalar(select(func.count()).select_from(Chapter)),
+        "genres": db.scalar(select(func.count()).select_from(Genre)),
+    }
+
+
+@app.get("/chapters")
+def chapter_urls(
+    skip: int = 0,
+    limit: int = Query(5000, le=10000),
+    db: Session = Depends(get_db),
+):
+    """Daftar (slug, number, lastmod) semua chapter — buat sitemap halaman baca.
+    lastmod diambil dari released_at ('dd/mm/yyyy' → 'yyyy-mm-dd'), fallback ke
+    created_at. Diurutkan by chapter.id supaya paging stabil."""
+    rows = db.execute(text("""
+        SELECT m.slug AS slug, c.number AS number,
+               c.released_at AS released_at, c.created_at AS created_at
+        FROM chapter c JOIN manga m ON m.id = c.manga_id
+        WHERE c.number IS NOT NULL
+        ORDER BY c.id
+        LIMIT :limit OFFSET :skip
+    """), {"limit": limit, "skip": skip}).all()
+    out = []
+    for r in rows:
+        ra = r.released_at
+        if ra and len(ra) == 10:
+            lastmod = f"{ra[6:10]}-{ra[3:5]}-{ra[0:2]}"
+        else:
+            lastmod = (r.created_at or "")[:10] or None
+        out.append({"slug": r.slug, "number": r.number, "lastmod": lastmod})
+    return out
+
+
 @app.get("/genres")
 def list_genres(db: Session = Depends(get_db)):
     rows = db.execute(
