@@ -360,7 +360,6 @@ def read_episode(
     anime_slug: str,
     number: str,
     fresh: bool = Query(False, description="abaikan cache, fetch ulang"),
-    db: Session = Depends(get_db),
 ):
     """Halaman episode — **live**: backend fetch halaman Otakudesu saat request
     masuk, ambil blok `.download` (link download per resolusi), lalu balikan.
@@ -370,7 +369,12 @@ def read_episode(
     pembungkus `link.desustream.com/?id=...` selesai diresolve di background.
     Request pertama bisa masih berisi pembungkus (tetap jalan: redirect 302);
     request berikutnya dapat link asli dari cache."""
-    data = _live_episode(_episode_url(anime_slug, number, db), fresh)
+    # Session ditutup SEBELUM scrape live: Depends(get_db) menahan koneksi DB
+    # sampai respons selesai, padahal scrape ke Otakudesu bisa lama. Kalau
+    # dibanjiri request, pool koneksi habis dan semua endpoint lain timeout.
+    with SessionLocal() as db:
+        ep_url = _episode_url(anime_slug, number, db)
+    data = _live_episode(ep_url, fresh)
     return {
         "slug": f"anime/{anime_slug}/episode/{number}",
         "anime_slug": anime_slug,
