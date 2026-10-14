@@ -14,6 +14,8 @@ env/
 # Database (data hasil scraping — jangan dikomit; besar & berubah terus)
 *.db
 *.db.bak
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 *-Copy.db

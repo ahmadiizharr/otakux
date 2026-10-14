@@ -124,8 +124,11 @@ menimpa thumbnail (thumbnail Otakudesu cuma cadangan bila AniList tak match).
   episode. `stream_url` default TIDAK butuh AJAX (dari `#pembed iframe`).
 - **Host link dibungkus `link.desustream.com/?id=<base64>`** yang balas **302**
   ke host asli (krakenfiles/pixeldrain/mega/dst). `scraper.resolve_link()` ambil
-  header `Location` (GET tanpa ikuti redirect). Endpoint episode SELALU meresolve
-  (paralel, hasil di-cache 5 mnt) → `url` tiap host = link asli langsung.
+  header `Location` (GET tanpa ikuti redirect). Resolve itu lambat (±5 dtk/link),
+  jadi endpoint episode meresolve **di background** (`_resolve_in_background`,
+  hasil di `_link_cache` tanpa TTL) dan tidak menunggunya: request pertama bisa
+  masih berisi pembungkus (tetap jalan via 302), berikutnya link asli. Data
+  episode (stream + mirror) di-cache 1 jam.
 
 ## Tugas umum → mulai dari mana
 
