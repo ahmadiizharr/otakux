@@ -7,7 +7,9 @@ Docs interaktif:
     http://127.0.0.1:8000/docs
 """
 from __future__ import annotations
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from fastapi import (
     FastAPI, Depends, HTTPException, Query, BackgroundTasks,
@@ -248,8 +250,19 @@ class EpisodeReader(BaseModel):
 
 # Cache halaman episode yang sudah diparse, {ep_url: (waktu, data)}. Cuma di
 # memori (hilang saat restart) — biar reload tidak nembak Otakudesu berulang.
-_EPISODE_TTL = 300          # detik
+# Embed stream & link download jarang berubah, jadi TTL 1 jam aman dan
+# mengurangi risiko IP server diblokir Otakudesu saat trafik tinggi.
+_EPISODE_TTL = 3600         # detik
+_EPISODE_CACHE_MAX = 5000   # entri; yang tertua dibuang supaya memori terbatas
 _episode_cache: dict[str, tuple[float, dict]] = {}
+
+# Hasil resolve `link.desustream.com/?id=...` -> link asli host. Pemetaannya
+# tetap, jadi disimpan terpisah dan tidak ikut kedaluwarsa bersama episode.
+_LINK_CACHE_MAX = 100_000
+_link_cache: dict[str, str] = {}
+_resolving: set[str] = set()
+_resolve_lock = threading.Lock()
+_resolve_pool = ThreadPoolExecutor(max_workers=10)
 
 
 def _as_float(x: str) -> float | None:
@@ -259,27 +272,41 @@ def _as_float(x: str) -> float | None:
         return None
 
 
-def _resolve_downloads(downloads: list[dict]) -> list[dict]:
-    """Ganti tiap host `url` dari pembungkus `link.desustream.com/?id=...`
-    menjadi **link asli host** (krakenfiles/pixeldrain/mega/dst).
+def _resolve_one(url: str) -> None:
+    try:
+        target = resolve_link(url)
+        with _resolve_lock:
+            _link_cache[url] = target
+            if len(_link_cache) > _LINK_CACHE_MAX:
+                _link_cache.pop(next(iter(_link_cache)))
+    finally:
+        with _resolve_lock:
+            _resolving.discard(url)
 
-    Resolve serentak pakai thread pool supaya 1 request API tidak menunggu
-    belasan redirect berurutan. Kalau suatu link gagal diresolve, `resolve_link`
-    mengembalikan URL pembungkus semula (aman, tidak error).
+
+def _resolve_in_background(downloads: list[dict]) -> None:
+    """Resolve link download di thread terpisah, tidak ditunggu request.
+
+    Resolve 1 link desustream bisa ±5 detik dan 1 episode punya ±15 link —
+    kalau ditunggu, halaman episode baru tampil >10 detik (pengunjung kabur,
+    Googlebot menganggap situs lambat). Selama belum selesai, link pembungkus
+    tetap bisa diklik (desustream redirect 302 ke host yang sama).
     """
-    from concurrent.futures import ThreadPoolExecutor
-
-    # Kumpulkan semua URL unik yang perlu diresolve.
     urls = {h["url"] for g in downloads for h in g["hosts"] if h.get("url")}
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        resolved = dict(zip(urls, ex.map(resolve_link, urls)))
+    with _resolve_lock:
+        todo = [u for u in urls if u not in _link_cache and u not in _resolving]
+        _resolving.update(todo)
+    for u in todo:
+        _resolve_pool.submit(_resolve_one, u)
 
-    out = []
-    for g in downloads:
-        hosts = [{**h, "url": resolved.get(h.get("url"), h.get("url"))}
-                 for h in g["hosts"]]
-        out.append({**g, "hosts": hosts})
-    return out
+
+def _with_resolved(downloads: list[dict]) -> list[dict]:
+    """Salinan `downloads` dengan link yang sudah diresolve diganti link asli."""
+    return [
+        {**g, "hosts": [{**h, "url": _link_cache.get(h.get("url"), h.get("url"))}
+                        for h in g["hosts"]]}
+        for g in downloads
+    ]
 
 
 def _episode_url(anime_slug: str, number: str, db: Session) -> str:
@@ -308,21 +335,24 @@ def _live_episode(ep_url: str, fresh: bool) -> dict:
     """Fetch + parse halaman episode (link download)."""
     hit = _episode_cache.get(ep_url)
     if hit and not fresh and (time.time() - hit[0]) < _EPISODE_TTL:
-        return hit[1]
-    try:
-        data = scrape_episode(ep_url)
-    except HttpError as e:
-        if e.status == 404:
-            raise HTTPException(404, f"Episode tidak ada di Otakudesu: {ep_url}")
-        raise HTTPException(502, f"Otakudesu balas HTTP {e.status}: {ep_url}")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"Gagal ambil episode dari Otakudesu: {e}")
-    # Langsung resolve: link download ke host asli + mirror stream ke embed asli
-    # (di-cache bareng data -> request berikutnya dalam TTL tak perlu ulang).
-    data["downloads"] = _resolve_downloads(data["downloads"])
-    data["mirror_streams"] = resolve_mirror_streams(ep_url, data.get("mirrors", []))
-    _episode_cache[ep_url] = (time.time(), data)
-    return data
+        data = hit[1]
+    else:
+        try:
+            data = scrape_episode(ep_url)
+        except HttpError as e:
+            if e.status == 404:
+                raise HTTPException(404, f"Episode tidak ada di Otakudesu: {ep_url}")
+            raise HTTPException(502, f"Otakudesu balas HTTP {e.status}: {ep_url}")
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"Gagal ambil episode dari Otakudesu: {e}")
+        # Mirror stream (±1 detik) ditunggu karena itu player-nya; link download
+        # (lambat) diresolve di background — lihat _resolve_in_background.
+        data["mirror_streams"] = resolve_mirror_streams(ep_url, data.get("mirrors", []))
+        _episode_cache[ep_url] = (time.time(), data)
+        if len(_episode_cache) > _EPISODE_CACHE_MAX:
+            _episode_cache.pop(next(iter(_episode_cache)), None)
+    _resolve_in_background(data["downloads"])
+    return {**data, "downloads": _with_resolved(data["downloads"])}
 
 
 @app.get("/anime/{anime_slug}/episode/{number}", response_model=EpisodeReader)
@@ -336,9 +366,10 @@ def read_episode(
     masuk, ambil blok `.download` (link download per resolusi), lalu balikan.
     Tidak ada link yang disimpan di DB.
 
-    Tiap host `url` **langsung link asli** (krakenfiles/pixeldrain/mega/dst) —
-    pembungkus `link.desustream.com/?id=...` sudah diresolve otomatis (ikut
-    redirect 302). Hasil di-cache jadi request berikutnya tetap cepat."""
+    Tiap host `url` jadi **link asli** (krakenfiles/pixeldrain/mega/dst) begitu
+    pembungkus `link.desustream.com/?id=...` selesai diresolve di background.
+    Request pertama bisa masih berisi pembungkus (tetap jalan: redirect 302);
+    request berikutnya dapat link asli dari cache."""
     data = _live_episode(_episode_url(anime_slug, number, db), fresh)
     return {
         "slug": f"anime/{anime_slug}/episode/{number}",
